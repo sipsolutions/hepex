@@ -56,9 +56,13 @@ func IsRTPPacket(data []byte) bool {
 	if data[0]>>6 != 2 {
 		return false
 	}
-	// Payload type should be in valid range
-	pt := data[1] & 0x7f
-	if pt > 127 {
+	cc := int(data[0] & 0x0f)
+	headerLen := 12 + (cc * 4)
+	if len(data) < headerLen {
+		return false
+	}
+	// skip RTCP packet types (200-204)
+	if data[1] >= 200 && data[1] <= 204 {
 		return false
 	}
 	return true
