@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/google/gopacket"
@@ -59,7 +61,14 @@ func (r *Reader) Close() {
 
 // ForEach calls fn for every parsed packet.
 func (r *Reader) ForEach(fn func(*Packet) error) error {
-	for packet := range r.source.Packets() {
+	for {
+		packet, err := r.source.NextPacket()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return fmt.Errorf("failed to read packet: %w", err)
+		}
 		pkt := parsePacket(packet)
 		if pkt == nil {
 			continue
@@ -68,7 +77,6 @@ func (r *Reader) ForEach(fn func(*Packet) error) error {
 			return err
 		}
 	}
-	return nil
 }
 
 func parsePacket(packet gopacket.Packet) *Packet {
