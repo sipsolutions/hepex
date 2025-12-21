@@ -19,6 +19,8 @@ import (
 var (
 	// Regex to match a=crypto lines
 	cryptoLineRegex = regexp.MustCompile(`(?m)^a=crypto:[^\r\n]*\r?\n`)
+	// Regex to match Content-Length header
+	contentLengthRegex = regexp.MustCompile(`(?i)Content-Length:\s*\d+`)
 )
 
 // DialogWriter manages pcap writers for each dialog
@@ -146,9 +148,8 @@ func updateContentLength(payload []byte) []byte {
 	bodyLen := len(body)
 
 	// Find and replace Content-Length header
-	clRegex := regexp.MustCompile(`(?i)Content-Length:\s*\d+`)
 	newCL := fmt.Sprintf("Content-Length: %d", bodyLen)
-	newHeader := clRegex.ReplaceAll(header, []byte(newCL))
+	newHeader := contentLengthRegex.ReplaceAll(header, []byte(newCL))
 
 	// Reconstruct the message
 	result := make([]byte, 0, len(newHeader)+len(sep)+len(body))
