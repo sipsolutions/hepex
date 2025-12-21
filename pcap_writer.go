@@ -103,7 +103,10 @@ func (dw *DialogWriter) WriteSIPPacket(filename string, sipPayload []byte, srcIP
 		payload = sanitizeSDP(sipPayload)
 	}
 
-	pkt := buildUDPPacket(payload, srcIP, dstIP, srcPort, dstPort)
+	pkt, err := buildUDPPacket(payload, srcIP, dstIP, srcPort, dstPort)
+	if err != nil {
+		return err
+	}
 
 	ci := gopacket.CaptureInfo{
 		Timestamp:     timestamp,
@@ -167,7 +170,10 @@ func (dw *DialogWriter) WriteRTPPacket(filename string, rtpPayload []byte, srcIP
 		return err
 	}
 
-	pkt := buildUDPPacket(rtpPayload, srcIP, dstIP, srcPort, dstPort)
+	pkt, err := buildUDPPacket(rtpPayload, srcIP, dstIP, srcPort, dstPort)
+	if err != nil {
+		return err
+	}
 
 	ci := gopacket.CaptureInfo{
 		Timestamp:     timestamp,
@@ -181,7 +187,12 @@ func (dw *DialogWriter) WriteRTPPacket(filename string, rtpPayload []byte, srcIP
 }
 
 // buildUDPPacket constructs a complete Ethernet/IP/UDP packet
-func buildUDPPacket(payload []byte, srcIP, dstIP net.IP, srcPort, dstPort uint16) []byte {
+func buildUDPPacket(payload []byte, srcIP, dstIP net.IP, srcPort, dstPort uint16) ([]byte, error) {
+	srcIPv4 := srcIP.To4()
+	dstIPv4 := dstIP.To4()
+	if srcIPv4 == nil || dstIPv4 == nil {
+		return nil, fmt.Errorf("invalid or non-IPv4 address: src=%v dst=%v", srcIP, dstIP)
+	}
 	// Ethernet header (14 bytes)
 	eth := make([]byte, 14)
 	// Dst MAC (dummy)
@@ -191,7 +202,7 @@ func buildUDPPacket(payload []byte, srcIP, dstIP net.IP, srcPort, dstPort uint16
 	// EtherType IPv4
 	binary.BigEndian.PutUint16(eth[12:], 0x0800)
 
-	ipHeader := buildIPv4Header(srcIP.To4(), dstIP.To4(), len(payload)+8)
+	ipHeader := buildIPv4Header(srcIPv4, dstIPv4, len(payload)+8)
 
 	// UDP header (8 bytes)
 	udp := make([]byte, 8)
@@ -207,7 +218,7 @@ func buildUDPPacket(payload []byte, srcIP, dstIP net.IP, srcPort, dstPort uint16
 	result = append(result, udp...)
 	result = append(result, payload...)
 
-	return result
+	return result, nil
 }
 
 func buildIPv4Header(srcIP, dstIP []byte, payloadLen int) []byte {
