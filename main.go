@@ -36,31 +36,25 @@ func main() {
 		log.Fatalf("Failed to open pcap: %v", err)
 	}
 
-	packets, err := reader.ReadAll()
-	reader.Close()
-	if err != nil {
-		log.Fatalf("Failed to read packets: %v", err)
-	}
-
-	log.Printf("Read %d packets from pcap", len(packets))
-
 	// First pass: Analyze HEP packets and build dialog map from SIP
 	log.Println("Pass 1: Analyzing HEP packets and building dialog map...")
 	tracker := NewDialogTracker()
 
+	packetCount := 0
 	hepCount := 0
 	protocolCounts := make(map[string]int)
 	tlsCounts := make(map[bool]int)
 	sipCount := 0
 	udpCount := 0
 
-	for _, pkt := range packets {
+	err = reader.ForEach(func(pkt *Packet) error {
+		packetCount++
 		if pkt.IsUDP && !pkt.IsHEP {
 			udpCount++
 		}
 
 		if !pkt.IsHEP || len(pkt.HEPPayload) == 0 {
-			continue
+			return nil
 		}
 
 		hepPkt, err := ParseHEP(pkt.HEPPayload)
@@ -68,7 +62,7 @@ func main() {
 			if *debug {
 				log.Printf("Failed to parse HEP: %v", err)
 			}
-			continue
+			return nil
 		}
 
 		hepCount++
@@ -84,7 +78,14 @@ func main() {
 				sipCount++
 			}
 		}
+		return nil
+	})
+	reader.Close()
+	if err != nil {
+		log.Fatalf("Failed to read packets: %v", err)
 	}
+
+	log.Printf("Read %d packets from pcap", packetCount)
 
 	log.Printf("HEP packets: %d", hepCount)
 	log.Printf("Protocol types:")
@@ -173,6 +174,11 @@ func main() {
 	// Second pass: Write packets to per-dialog pcap files
 	log.Println("Pass 2: Writing per-dialog pcap files...")
 
+	reader, err = NewReader(*inputFile, uint16(*hepPort))
+	if err != nil {
+		log.Fatalf("Failed to reopen pcap: %v", err)
+	}
+
 	writer, err := NewDialogWriter(*outputDir, true)
 	if err != nil {
 		log.Fatalf("Failed to create writer: %v", err)
@@ -185,28 +191,28 @@ func main() {
 	rtpDecryptFailed := 0
 	rtpUnmatched := 0
 
-	for _, pkt := range packets {
+	err = reader.ForEach(func(pkt *Packet) error {
 		// Process HEP-encapsulated SIP
 		if pkt.IsHEP && len(pkt.HEPPayload) > 0 {
 			hepPkt, err := ParseHEP(pkt.HEPPayload)
 			if err != nil {
-				continue
+				return nil
 			}
 
 			if hepPkt.IsSIP() && len(hepPkt.Payload) > 0 {
 				sipMsg, err := ParseSIP(hepPkt.Payload)
 				if err != nil || sipMsg == nil {
-					continue
+					return nil
 				}
 
 				// Check if this dialog is in our filtered list
 				if !validDialogs[sipMsg.CallID] {
-					continue
+					return nil
 				}
 
 				dialog := tracker.FindDialogByCallID(sipMsg.CallID)
 				if dialog == nil {
-					continue
+					return nil
 				}
 
 				filename := dialog.Filename()
@@ -223,13 +229,13 @@ func main() {
 					sipWritten++
 				}
 			}
-			continue
+			return nil
 		}
 
 		// Process raw UDP packets for SRTP/RTP
 		if pkt.IsUDP && len(pkt.UDPPayload) > 0 && !pkt.IsHEP {
 			if !IsRTPPacket(pkt.UDPPayload) {
-				continue
+				return nil
 			}
 
 			srcIP := net.ParseIP(pkt.SrcIP)
@@ -241,11 +247,11 @@ func main() {
 			)
 			if dialog == nil {
 				rtpUnmatched++
-				continue
+				return nil
 			}
 
 			if !validDialogs[dialog.CallID] {
-				continue
+				return nil
 			}
 
 			filename := dialog.Filename()
@@ -285,6 +291,11 @@ func main() {
 				rtpWritten++
 			}
 		}
+		return nil
+	})
+	reader.Close()
+	if err != nil {
+		log.Fatalf("Failed to read packets: %v", err)
 	}
 
 	if *debug {

@@ -52,18 +52,18 @@ func (r *Reader) Close() {
 	}
 }
 
-// ReadAll reads all packets and returns them as a slice
-func (r *Reader) ReadAll() ([]*Packet, error) {
-	var packets []*Packet
-
+// ForEach calls fn for every parsed packet.
+func (r *Reader) ForEach(fn func(*Packet) error) error {
 	for packet := range r.source.Packets() {
 		pkt := parsePacket(packet, r.hepPort)
-		if pkt != nil {
-			packets = append(packets, pkt)
+		if pkt == nil {
+			continue
+		}
+		if err := fn(pkt); err != nil {
+			return err
 		}
 	}
-
-	return packets, nil
+	return nil
 }
 
 func parsePacket(packet gopacket.Packet, hepPort uint16) *Packet {
