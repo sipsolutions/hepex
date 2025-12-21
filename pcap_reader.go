@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"fmt"
 	"time"
 
@@ -24,24 +25,28 @@ type Packet struct {
 
 // Reader reads packets from a pcap file
 type Reader struct {
-	handle  *pcap.Handle
-	source  *gopacket.PacketSource
-	hepPort uint16
+	handle *pcap.Handle
+	source *gopacket.PacketSource
 }
 
 // NewReader creates a new pcap reader
-func NewReader(filename string, hepPort uint16) (*Reader, error) {
+func NewReader(filename string, bpfFilter string) (*Reader, error) {
 	handle, err := pcap.OpenOffline(filename)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open pcap: %w", err)
+	}
+	if bpfFilter != "" {
+		if err := handle.SetBPFFilter(bpfFilter); err != nil {
+			handle.Close()
+			return nil, fmt.Errorf("failed to set BPF filter: %w", err)
+		}
 	}
 
 	source := gopacket.NewPacketSource(handle, handle.LinkType())
 
 	return &Reader{
-		handle:  handle,
-		source:  source,
-		hepPort: hepPort,
+		handle: handle,
+		source: source,
 	}, nil
 }
 
@@ -55,7 +60,7 @@ func (r *Reader) Close() {
 // ForEach calls fn for every parsed packet.
 func (r *Reader) ForEach(fn func(*Packet) error) error {
 	for packet := range r.source.Packets() {
-		pkt := parsePacket(packet, r.hepPort)
+		pkt := parsePacket(packet)
 		if pkt == nil {
 			continue
 		}
@@ -66,7 +71,7 @@ func (r *Reader) ForEach(fn func(*Packet) error) error {
 	return nil
 }
 
-func parsePacket(packet gopacket.Packet, hepPort uint16) *Packet {
+func parsePacket(packet gopacket.Packet) *Packet {
 	pkt := &Packet{
 		Timestamp: packet.Metadata().Timestamp,
 	}
@@ -86,12 +91,25 @@ func parsePacket(packet gopacket.Packet, hepPort uint16) *Packet {
 		pkt.IsUDP = true
 		pkt.UDPPayload = udp.Payload
 
-		// Check if this is HEP traffic
-		if pkt.DstPort == hepPort || pkt.SrcPort == hepPort {
+		if isHEPPayload(udp.Payload) {
 			pkt.IsHEP = true
 			pkt.HEPPayload = udp.Payload
 		}
 	}
 
 	return pkt
+}
+
+func isHEPPayload(payload []byte) bool {
+	if len(payload) < 6 {
+		return false
+	}
+	if string(payload[0:4]) != "HEP3" {
+		return false
+	}
+	totalLen := binary.BigEndian.Uint16(payload[4:6])
+	if totalLen < 6 || int(totalLen) > len(payload) {
+		return false
+	}
+	return true
 }

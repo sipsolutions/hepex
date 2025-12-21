@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"strings"
 
 	flag "github.com/spf13/pflag"
@@ -15,11 +16,11 @@ var (
 )
 
 func main() {
-	inputFile := flag.StringP("input", "i", "", "Input pcap file containing HEP traffic")
+	inputFile := flag.StringP("input", "i", "", "Input pcap file or network interface")
 	outputDir := flag.StringP("output", "o", "pcap", "Output directory for per-dialog pcap files")
 	fromFilter := flag.StringP("from", "f", "", "Filter by caller number (partial match)")
 	toFilter := flag.StringP("to", "t", "", "Filter by callee number (partial match)")
-	hepPort := flag.UintP("hep-port", "p", 9060, "HEP capture port")
+	bpfFilter := flag.StringP("bpf", "b", "", "BPF filter expression for live capture")
 	debug := flag.BoolP("debug", "d", false, "Enable debug output")
 	version := flag.BoolP("version", "v", false, "Print version and exit")
 	flag.Parse()
@@ -29,9 +30,34 @@ func main() {
 		return
 	}
 
+	if *inputFile == "" {
+		log.Fatal("Input is required")
+	}
+
+	inputPath := *inputFile
+	cleanupInput := false
+	if info, err := os.Stat(*inputFile); err == nil {
+		if info.IsDir() {
+			log.Fatalf("Input is a directory: %s", *inputFile)
+		}
+	} else if os.IsNotExist(err) {
+		log.Printf("Starting live capture on interface %s", *inputFile)
+		captured, err := captureLiveToTemp(*inputFile, *bpfFilter)
+		if err != nil {
+			log.Fatalf("Failed to capture live traffic: %v", err)
+		}
+		inputPath = captured
+		cleanupInput = true
+	} else {
+		log.Fatalf("Failed to access input: %v", err)
+	}
+	if cleanupInput {
+		defer os.Remove(inputPath)
+	}
+
 	log.Println("Reading pcap file...")
 
-	reader, err := NewReader(*inputFile, uint16(*hepPort))
+	reader, err := NewReader(inputPath, *bpfFilter)
 	if err != nil {
 		log.Fatalf("Failed to open pcap: %v", err)
 	}
@@ -88,6 +114,9 @@ func main() {
 	log.Printf("Read %d packets from pcap", packetCount)
 
 	log.Printf("HEP packets: %d", hepCount)
+	if hepCount == 0 {
+		log.Fatal("No HEP packets detected; check input or BPF filter")
+	}
 	log.Printf("Protocol types:")
 	for proto, count := range protocolCounts {
 		log.Printf("  %s: %d", proto, count)
@@ -174,7 +203,7 @@ func main() {
 	// Second pass: Write packets to per-dialog pcap files
 	log.Println("Pass 2: Writing per-dialog pcap files...")
 
-	reader, err = NewReader(*inputFile, uint16(*hepPort))
+	reader, err = NewReader(inputPath, *bpfFilter)
 	if err != nil {
 		log.Fatalf("Failed to reopen pcap: %v", err)
 	}
