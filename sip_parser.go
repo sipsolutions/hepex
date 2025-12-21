@@ -61,10 +61,6 @@ func ParseSIP(data []byte) (*SIPMessage, error) {
 	text := string(data)
 	lines := strings.Split(text, "\r\n")
 	if len(lines) == 0 {
-		lines = strings.Split(text, "\n")
-	}
-
-	if len(lines) == 0 {
 		return nil, nil
 	}
 
@@ -138,9 +134,6 @@ func parseSDP(body string) *SDP {
 	sdp := &SDP{}
 
 	lines := strings.Split(body, "\r\n")
-	if len(lines) <= 1 {
-		lines = strings.Split(body, "\n")
-	}
 
 	var currentMedia *SDPMedia
 
