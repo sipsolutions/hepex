@@ -56,6 +56,13 @@ func ParseHEP(data []byte) (*HEPPacket, error) {
 
 	pkt := &HEPPacket{}
 
+	var (
+		secSet  bool
+		usecSet bool
+		sec     uint32
+		usec    uint32
+	)
+
 	// Parse chunks
 	offset := 6
 	for offset < int(totalLen) {
@@ -101,13 +108,13 @@ func ParseHEP(data []byte) (*HEPPacket, error) {
 			}
 		case ChunkTimestampSec:
 			if len(chunkData) >= 4 {
-				sec := binary.BigEndian.Uint32(chunkData)
-				pkt.Timestamp = time.Unix(int64(sec), pkt.Timestamp.UnixNano()%1e9)
+				sec = binary.BigEndian.Uint32(chunkData)
+				secSet = true
 			}
 		case ChunkTimestampUsec:
 			if len(chunkData) >= 4 {
-				usec := binary.BigEndian.Uint32(chunkData)
-				pkt.Timestamp = time.Unix(pkt.Timestamp.Unix(), int64(usec)*1000)
+				usec = binary.BigEndian.Uint32(chunkData)
+				usecSet = true
 			}
 		case ChunkProtocolType:
 			if len(chunkData) >= 1 {
@@ -119,6 +126,10 @@ func ParseHEP(data []byte) (*HEPPacket, error) {
 		}
 
 		offset += int(chunkLen)
+	}
+
+	if secSet || usecSet {
+		pkt.Timestamp = time.Unix(int64(sec), int64(usec)*1000)
 	}
 
 	return pkt, nil
