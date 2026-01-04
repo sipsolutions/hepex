@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"strings"
 	"time"
 )
 
@@ -62,6 +63,19 @@ func sanitizeFilename(s string) string {
 		}
 	}
 	return string(result)
+}
+
+func (d *Dialog) MatchesFilters(fromFilter, toFilter string) bool {
+	if d == nil {
+		return false
+	}
+	if fromFilter != "" && !strings.Contains(d.FromUser, fromFilter) {
+		return false
+	}
+	if toFilter != "" && !strings.Contains(d.ToUser, toFilter) {
+		return false
+	}
+	return true
 }
 
 // DialogTracker manages SIP dialogs and maps media streams to them
@@ -133,6 +147,11 @@ func (dt *DialogTracker) findOrCreateDialog(msg *SIPMessage, timestamp time.Time
 
 func (dt *DialogTracker) extractMediaStreams(dialog *Dialog, msg *SIPMessage) {
 	if msg.SDP == nil {
+		return
+	}
+
+	// Only process first SDP with crypto to avoid duplicates
+	if dialog.HasCrypto() {
 		return
 	}
 

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -34,9 +35,9 @@ type SDPConnection struct {
 type SDPMedia struct {
 	Type       string // audio, video
 	Port       int
-	Connection *SDPConnection // media-level c= line
+	Connection *SDPConnection
 	Crypto     []SDPCrypto
-	RTCP       int // rtcp port if different from RTP+1
+	RTCP       int
 }
 
 // SDPCrypto represents a=crypto line for SDES
@@ -64,17 +65,15 @@ func ParseSIP(data []byte) (*SIPMessage, error) {
 		return nil, nil
 	}
 
-	// Parse first line
 	firstLine := lines[0]
 	if matches := sipRequestLine.FindStringSubmatch(firstLine); matches != nil {
 		msg.IsRequest = true
 		msg.Method = matches[1]
 	} else if matches := sipResponseLine.FindStringSubmatch(firstLine); matches != nil {
 		msg.IsRequest = false
-		msg.StatusCode = atoi(matches[1])
+		msg.StatusCode, _ = strconv.Atoi(matches[1])
 	}
 
-	// Parse headers
 	var bodyStart int
 	var contentType string
 	for i := 1; i < len(lines); i++ {
@@ -84,7 +83,6 @@ func ParseSIP(data []byte) (*SIPMessage, error) {
 			break
 		}
 
-		// Handle header continuation
 		if strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t") {
 			continue
 		}
@@ -109,7 +107,6 @@ func ParseSIP(data []byte) (*SIPMessage, error) {
 		}
 	}
 
-	// Parse SDP body if present
 	if bodyStart > 0 && bodyStart < len(lines) {
 		if strings.Contains(strings.ToLower(contentType), "application/sdp") {
 			body := strings.Join(lines[bodyStart:], "\r\n")
@@ -180,7 +177,7 @@ func parseMediaLine(value string) SDPMedia {
 	parts := strings.Fields(value)
 	if len(parts) >= 2 {
 		media.Type = parts[0]
-		media.Port = atoi(parts[1])
+		media.Port, _ = strconv.Atoi(parts[1])
 	}
 	return media
 }
@@ -202,7 +199,9 @@ func parseAttribute(value string, media *SDPMedia) {
 	case "rtcp":
 		parts := strings.Fields(attrValue)
 		if len(parts) >= 1 {
-			media.RTCP = atoi(parts[0])
+			if port, err := strconv.Atoi(parts[0]); err == nil {
+				media.RTCP = port
+			}
 		}
 	}
 }
@@ -224,16 +223,4 @@ func parseCryptoLine(value string) *SDPCrypto {
 	}
 
 	return crypto
-}
-
-func atoi(s string) int {
-	var n int
-	for _, c := range s {
-		if c >= '0' && c <= '9' {
-			n = n*10 + int(c-'0')
-		} else {
-			break
-		}
-	}
-	return n
 }
