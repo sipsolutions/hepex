@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"time"
 
 	flag "github.com/spf13/pflag"
 )
@@ -18,6 +19,7 @@ func main() {
 	fromFilter := flag.StringP("from", "f", "", "Filter by caller number (partial match)")
 	toFilter := flag.StringP("to", "t", "", "Filter by callee number (partial match)")
 	bpfFilter := flag.StringP("bpf", "b", "", "BPF filter expression")
+	dialogMaxIdle := flag.Duration("dialog-max-idle", 10*time.Minute, "Maximum dialog idle time before cleanup")
 	debug := flag.BoolP("debug", "D", false, "Enable debug output")
 	version := flag.BoolP("version", "v", false, "Print version and exit")
 	flag.Parse()
@@ -32,12 +34,12 @@ func main() {
 	}
 
 	log.Printf("Starting live capture on interface %s", *device)
-	if err := runLiveCapture(*device, *bpfFilter, *outputDir, *fromFilter, *toFilter, *debug); err != nil {
+	if err := runLiveCapture(*device, *bpfFilter, *outputDir, *fromFilter, *toFilter, *debug, *dialogMaxIdle); err != nil {
 		log.Fatalf("Failed to capture live traffic: %v", err)
 	}
 }
 
-func runLiveCapture(iface, bpfFilter, outputDir, fromFilter, toFilter string, debug bool) error {
+func runLiveCapture(iface, bpfFilter, outputDir, fromFilter, toFilter string, debug bool, dialogMaxIdle time.Duration) error {
 	handle, source, err := openLiveSource(iface, bpfFilter)
 	if err != nil {
 		return err
@@ -51,7 +53,7 @@ func runLiveCapture(iface, bpfFilter, outputDir, fromFilter, toFilter string, de
 	}
 	defer writer.Close()
 
-	processor := NewLiveProcessor(tracker, writer, fromFilter, toFilter, debug)
+	processor := NewLiveProcessor(tracker, writer, fromFilter, toFilter, debug, dialogMaxIdle)
 
 	packetCount := 0
 	for packet := range source.Packets() {

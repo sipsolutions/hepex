@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"hash/fnv"
 	"net"
 	"strings"
 	"sync"
@@ -21,12 +22,13 @@ type MediaStream struct {
 // Dialog represents a SIP dialog
 type Dialog struct {
 	CallID       string
-	FromTag      string
-	ToTag        string
 	FromUser     string
 	ToUser       string
 	StartTime    time.Time
+	LastSeen     time.Time
 	MediaStreams []MediaStream
+	MediaKeys    []string
+	ContextKeys  []string
 }
 
 // Filename returns the output filename for this dialog
@@ -39,9 +41,9 @@ func (d *Dialog) Filename() string {
 	if toUser == "" {
 		toUser = "unknown"
 	}
-	// Format: YYYYmmddTHHMMSS
+
 	timestamp := d.StartTime.Format("20060102T150405")
-	return fmt.Sprintf("%s_%s_%s.pcap", timestamp, fromUser, toUser)
+	return fmt.Sprintf("%s_%s_%s_%s.pcap", timestamp, fromUser, toUser, d.fileSuffix())
 }
 
 // HasCrypto returns true if any media stream has SRTP crypto keys
@@ -65,6 +67,17 @@ func sanitizeFilename(s string) string {
 	return string(result)
 }
 
+func (d *Dialog) fileSuffix() string {
+	suffix := sanitizeFilename(d.CallID)
+	if suffix != "" {
+		return suffix
+	}
+
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(d.CallID))
+	return fmt.Sprintf("%08x", hasher.Sum32())
+}
+
 func (d *Dialog) MatchesFilters(fromFilter, toFilter string) bool {
 	if d == nil {
 		return false
@@ -81,10 +94,8 @@ func (d *Dialog) MatchesFilters(fromFilter, toFilter string) bool {
 // DialogTracker manages SIP dialogs and maps media streams to them
 type DialogTracker struct {
 	sync.RWMutex
-	// Map from Call-ID to Dialog
 	dialogsByCallID map[string]*Dialog
-	// Map from IP:port to Dialog for RTP correlation
-	mediaToDialog map[string]*Dialog
+	mediaToDialog   map[string]*Dialog
 }
 
 // NewDialogTracker creates a new dialog tracker
@@ -100,67 +111,64 @@ func (dt *DialogTracker) ProcessSIPMessage(msg *SIPMessage, timestamp time.Time)
 	dt.Lock()
 	defer dt.Unlock()
 
-	dialog := dt.findOrCreateDialog(msg, timestamp)
+	dialog := dt.upsertDialog(msg, timestamp)
 	if dialog == nil {
 		return nil
 	}
 
-	// Update To-tag from response
-	if !msg.IsRequest && msg.StatusCode >= 200 && msg.StatusCode < 300 {
-		if dialog.ToTag == "" && msg.ToTag != "" {
-			dialog.ToTag = msg.ToTag
-		}
-	}
+	dialog.LastSeen = timestamp
 
-	// Extract media info from SDP
 	if msg.SDP != nil {
-		dt.extractMediaStreams(dialog, msg)
+		dt.replaceDialogMedia(dialog, msg.SDP)
 	}
 
 	return dialog
 }
 
-func (dt *DialogTracker) findOrCreateDialog(msg *SIPMessage, timestamp time.Time) *Dialog {
+func (dt *DialogTracker) upsertDialog(msg *SIPMessage, timestamp time.Time) *Dialog {
 	if msg.CallID == "" {
 		return nil
 	}
 
-	dialog, exists := dt.dialogsByCallID[msg.CallID]
-	if !exists {
-		dialog = &Dialog{
-			CallID:    msg.CallID,
-			FromTag:   msg.FromTag,
-			ToTag:     msg.ToTag,
-			FromUser:  msg.FromUser,
-			ToUser:    msg.ToUser,
-			StartTime: timestamp,
-		}
-		dt.dialogsByCallID[msg.CallID] = dialog
+	if dialog, ok := dt.dialogsByCallID[msg.CallID]; ok {
+		dt.updateDialogMetadata(dialog, msg)
+		return dialog
 	}
 
-	if dialog.ToTag == "" && msg.ToTag != "" {
-		dialog.ToTag = msg.ToTag
-	}
-
+	dialog := newDialogFromMessage(msg, timestamp)
+	dt.dialogsByCallID[msg.CallID] = dialog
 	return dialog
 }
 
-func (dt *DialogTracker) extractMediaStreams(dialog *Dialog, msg *SIPMessage) {
-	if msg.SDP == nil {
-		return
+func newDialogFromMessage(msg *SIPMessage, timestamp time.Time) *Dialog {
+	return &Dialog{
+		CallID:    msg.CallID,
+		FromUser:  msg.FromUser,
+		ToUser:    msg.ToUser,
+		StartTime: timestamp,
+		LastSeen:  timestamp,
 	}
+}
 
-	// Only process first SDP with crypto to avoid duplicates
-	if dialog.HasCrypto() {
-		return
+func (dt *DialogTracker) updateDialogMetadata(dialog *Dialog, msg *SIPMessage) {
+	if dialog.FromUser == "" {
+		dialog.FromUser = msg.FromUser
 	}
+	if dialog.ToUser == "" {
+		dialog.ToUser = msg.ToUser
+	}
+}
 
-	// Get session-level connection if no media-level
-	sessionConn := msg.SDP.Connection
+func (dt *DialogTracker) replaceDialogMedia(dialog *Dialog, sdp *SDP) {
+	dt.unmapDialogMedia(dialog)
 
-	for _, media := range msg.SDP.Media {
+	streams := make([]MediaStream, 0, len(sdp.Media))
+	mediaKeys := make([]string, 0, len(sdp.Media)*2)
+	sessionConn := sdp.Connection
+
+	for _, media := range sdp.Media {
 		if media.Port == 0 {
-			continue // disabled media
+			continue
 		}
 
 		conn := media.Connection
@@ -176,30 +184,62 @@ func (dt *DialogTracker) extractMediaStreams(dialog *Dialog, msg *SIPMessage) {
 			LocalPort: media.Port,
 			MediaType: media.Type,
 		}
-
-		// Get crypto info
 		if len(media.Crypto) > 0 {
-			crypto := media.Crypto[0] // Use first crypto suite
+			crypto := media.Crypto[0]
 			stream.CryptoSuite = crypto.CryptoSuite
 			stream.MasterKey = crypto.MasterKey
 			stream.MasterSalt = crypto.MasterSalt
 		}
 
-		// Add stream and map it
-		dialog.MediaStreams = append(dialog.MediaStreams, stream)
+		streams = append(streams, stream)
 
-		// Map this IP:port to the dialog
-		key := fmt.Sprintf("%s:%d", conn.Address, media.Port)
-		dt.mediaToDialog[key] = dialog
+		rtpKey := mediaAddressKey(conn.Address, media.Port)
+		dt.mediaToDialog[rtpKey] = dialog
+		mediaKeys = append(mediaKeys, rtpKey)
 
-		// Also map RTCP port (RTP port + 1, unless specified)
 		rtcpPort := media.Port + 1
 		if media.RTCP != 0 {
 			rtcpPort = media.RTCP
 		}
-		rtcpKey := fmt.Sprintf("%s:%d", conn.Address, rtcpPort)
+		rtcpKey := mediaAddressKey(conn.Address, rtcpPort)
 		dt.mediaToDialog[rtcpKey] = dialog
+		mediaKeys = append(mediaKeys, rtcpKey)
 	}
+
+	dialog.MediaStreams = streams
+	dialog.MediaKeys = mediaKeys
+}
+
+func (dt *DialogTracker) unmapDialogMedia(dialog *Dialog) {
+	for _, key := range dialog.MediaKeys {
+		if dt.mediaToDialog[key] == dialog {
+			delete(dt.mediaToDialog, key)
+		}
+	}
+	dialog.MediaStreams = nil
+	dialog.MediaKeys = nil
+}
+
+func (dt *DialogTracker) PruneExpired(now time.Time, maxIdle time.Duration) []*Dialog {
+	dt.Lock()
+	defer dt.Unlock()
+
+	var expired []*Dialog
+
+	for key, dialog := range dt.dialogsByCallID {
+		if now.Sub(dialog.LastSeen) <= maxIdle {
+			continue
+		}
+		dt.unmapDialogMedia(dialog)
+		delete(dt.dialogsByCallID, key)
+		expired = append(expired, dialog)
+	}
+
+	return expired
+}
+
+func mediaAddressKey(address string, port int) string {
+	return fmt.Sprintf("%s:%d", address, port)
 }
 
 // FindDialogForMedia finds the dialog associated with an RTP/RTCP stream
@@ -207,14 +247,12 @@ func (dt *DialogTracker) FindDialogForMedia(srcIP net.IP, srcPort int, dstIP net
 	dt.RLock()
 	defer dt.RUnlock()
 
-	// Try source IP:port
-	srcKey := fmt.Sprintf("%s:%d", srcIP.String(), srcPort)
+	srcKey := mediaAddressKey(srcIP.String(), srcPort)
 	if dialog, ok := dt.mediaToDialog[srcKey]; ok {
 		return dialog
 	}
 
-	// Try destination IP:port
-	dstKey := fmt.Sprintf("%s:%d", dstIP.String(), dstPort)
+	dstKey := mediaAddressKey(dstIP.String(), dstPort)
 	if dialog, ok := dt.mediaToDialog[dstKey]; ok {
 		return dialog
 	}

@@ -96,12 +96,14 @@ func openLiveSource(iface, bpfFilter string) (*pcap.Handle, *gopacket.PacketSour
 }
 
 type LiveProcessor struct {
-	tracker      *DialogTracker
-	writer       *DialogWriter
-	srtpContexts map[string]*SRTPContext
-	fromFilter   string
-	toFilter     string
-	debug        bool
+	tracker       *DialogTracker
+	writer        *DialogWriter
+	srtpContexts  map[string]*SRTPContext
+	fromFilter    string
+	toFilter      string
+	dialogMaxIdle time.Duration
+	debug         bool
+	lastPrune     time.Time
 
 	sipWritten       int
 	rtpWritten       int
@@ -112,18 +114,22 @@ type LiveProcessor struct {
 	rtpDropped       int
 }
 
-func NewLiveProcessor(tracker *DialogTracker, writer *DialogWriter, fromFilter, toFilter string, debug bool) *LiveProcessor {
+func NewLiveProcessor(tracker *DialogTracker, writer *DialogWriter, fromFilter, toFilter string, debug bool, dialogMaxIdle time.Duration) *LiveProcessor {
 	return &LiveProcessor{
-		tracker:      tracker,
-		writer:       writer,
-		srtpContexts: make(map[string]*SRTPContext),
-		fromFilter:   fromFilter,
-		toFilter:     toFilter,
-		debug:        debug,
+		tracker:       tracker,
+		writer:        writer,
+		srtpContexts:  make(map[string]*SRTPContext),
+		fromFilter:    fromFilter,
+		toFilter:      toFilter,
+		dialogMaxIdle: dialogMaxIdle,
+		debug:         debug,
+		lastPrune:     time.Now(),
 	}
 }
 
 func (p *LiveProcessor) ProcessPacket(pkt *Packet) error {
+	p.pruneExpiredDialogs(pkt.Timestamp)
+
 	if pkt.IsHEP && len(pkt.Payload) > 0 {
 		return p.processHEPSIP(pkt)
 	}
@@ -181,6 +187,8 @@ func (p *LiveProcessor) processRTP(pkt *Packet) error {
 		return nil
 	}
 
+	dialog.LastSeen = pkt.Timestamp
+
 	if !dialog.HasCrypto() || !dialog.MatchesFilters(p.fromFilter, p.toFilter) {
 		p.rtpDropped++
 		return nil
@@ -193,11 +201,11 @@ func (p *LiveProcessor) srtpContextForEndpoints(srcIP, dstIP net.IP, srcPort, ds
 	if srcIP == nil || dstIP == nil {
 		return nil
 	}
-	srcKey := fmt.Sprintf("%s:%d", srcIP.String(), srcPort)
+	srcKey := mediaAddressKey(srcIP.String(), int(srcPort))
 	if c, ok := p.srtpContexts[srcKey]; ok {
 		return c
 	}
-	dstKey := fmt.Sprintf("%s:%d", dstIP.String(), dstPort)
+	dstKey := mediaAddressKey(dstIP.String(), int(dstPort))
 	if c, ok := p.srtpContexts[dstKey]; ok {
 		return c
 	}
@@ -249,11 +257,16 @@ func (p *LiveProcessor) writeRTP(dialog *Dialog, payload []byte, srcIP, dstIP ne
 }
 
 func (p *LiveProcessor) addDialogSRTPContexts(dialog *Dialog) {
+	oldKeys := dialog.ContextKeys
+	dialog.ContextKeys = nil
+	desiredKeys := make(map[string]struct{})
+
 	for _, ms := range dialog.MediaStreams {
 		if len(ms.MasterKey) == 0 || len(ms.MasterSalt) == 0 {
 			continue
 		}
-		key := fmt.Sprintf("%s:%d", ms.LocalIP, ms.LocalPort)
+		key := mediaAddressKey(ms.LocalIP.String(), ms.LocalPort)
+		desiredKeys[key] = struct{}{}
 		if _, exists := p.srtpContexts[key]; exists {
 			continue
 		}
@@ -263,4 +276,35 @@ func (p *LiveProcessor) addDialogSRTPContexts(dialog *Dialog) {
 		}
 		p.srtpContexts[key] = ctx
 	}
+
+	for _, key := range oldKeys {
+		if _, keep := desiredKeys[key]; keep {
+			continue
+		}
+		delete(p.srtpContexts, key)
+	}
+
+	for key := range desiredKeys {
+		dialog.ContextKeys = append(dialog.ContextKeys, key)
+	}
+}
+
+func (p *LiveProcessor) pruneExpiredDialogs(now time.Time) {
+	const pruneInterval = time.Minute
+
+	if !p.lastPrune.IsZero() && now.Sub(p.lastPrune) < pruneInterval {
+		return
+	}
+
+	for _, dialog := range p.tracker.PruneExpired(now, p.dialogMaxIdle) {
+		p.removeDialogSRTPContexts(dialog)
+	}
+	p.lastPrune = now
+}
+
+func (p *LiveProcessor) removeDialogSRTPContexts(dialog *Dialog) {
+	for _, key := range dialog.ContextKeys {
+		delete(p.srtpContexts, key)
+	}
+	dialog.ContextKeys = nil
 }
