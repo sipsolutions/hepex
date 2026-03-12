@@ -2,9 +2,7 @@ package main
 
 import (
 	"encoding/binary"
-	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/signal"
@@ -16,71 +14,15 @@ import (
 	"github.com/google/gopacket/pcap"
 )
 
-// Packet represents a captured packet with metadata
+// Packet represents a captured UDP packet with metadata
 type Packet struct {
-	Timestamp  time.Time
-	SrcIP      string
-	DstIP      string
-	SrcPort    uint16
-	DstPort    uint16
-	IsHEP      bool
-	HEPPayload []byte
-	IsUDP      bool
-	UDPPayload []byte
-}
-
-// Reader reads packets from a pcap file
-type Reader struct {
-	handle *pcap.Handle
-	source *gopacket.PacketSource
-}
-
-// NewReader creates a new pcap reader
-func NewReader(filename string, bpfFilter string) (*Reader, error) {
-	handle, err := pcap.OpenOffline(filename)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open pcap: %w", err)
-	}
-	if bpfFilter != "" {
-		if err := handle.SetBPFFilter(bpfFilter); err != nil {
-			handle.Close()
-			return nil, fmt.Errorf("failed to set BPF filter: %w", err)
-		}
-	}
-
-	source := gopacket.NewPacketSource(handle, handle.LinkType())
-
-	return &Reader{
-		handle: handle,
-		source: source,
-	}, nil
-}
-
-// Close closes the pcap handle
-func (r *Reader) Close() {
-	if r.handle != nil {
-		r.handle.Close()
-	}
-}
-
-// ForEach calls fn for every parsed packet.
-func (r *Reader) ForEach(fn func(*Packet) error) error {
-	for {
-		packet, err := r.source.NextPacket()
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return nil
-			}
-			return fmt.Errorf("failed to read packet: %w", err)
-		}
-		pkt := parsePacket(packet)
-		if pkt == nil {
-			continue
-		}
-		if err := fn(pkt); err != nil {
-			return err
-		}
-	}
+	Timestamp time.Time
+	SrcIP     string
+	DstIP     string
+	SrcPort   uint16
+	DstPort   uint16
+	IsHEP     bool
+	Payload   []byte
 }
 
 func parsePacket(packet gopacket.Packet) *Packet {
@@ -103,12 +45,10 @@ func parsePacket(packet gopacket.Packet) *Packet {
 	udp := udpLayer.(*layers.UDP)
 	pkt.SrcPort = uint16(udp.SrcPort)
 	pkt.DstPort = uint16(udp.DstPort)
-	pkt.IsUDP = true
-	pkt.UDPPayload = udp.Payload
+	pkt.Payload = udp.Payload
 
-	if isHEPPayload(udp.Payload) {
+	if isHEPPayload(pkt.Payload) {
 		pkt.IsHEP = true
-		pkt.HEPPayload = udp.Payload
 	}
 
 	return pkt
@@ -184,18 +124,18 @@ func NewLiveProcessor(tracker *DialogTracker, writer *DialogWriter, fromFilter, 
 }
 
 func (p *LiveProcessor) ProcessPacket(pkt *Packet) error {
-	if pkt.IsHEP && len(pkt.HEPPayload) > 0 {
+	if pkt.IsHEP && len(pkt.Payload) > 0 {
 		return p.processHEPSIP(pkt)
 	}
 
-	if pkt.IsUDP && len(pkt.UDPPayload) > 0 && !pkt.IsHEP {
+	if len(pkt.Payload) > 0 && !pkt.IsHEP {
 		return p.processRTP(pkt)
 	}
 	return nil
 }
 
 func (p *LiveProcessor) processHEPSIP(pkt *Packet) error {
-	hepPkt, err := ParseHEP(pkt.HEPPayload)
+	hepPkt, err := ParseHEP(pkt.Payload)
 	if err != nil {
 		return nil
 	}
@@ -222,7 +162,7 @@ func (p *LiveProcessor) processHEPSIP(pkt *Packet) error {
 }
 
 func (p *LiveProcessor) processRTP(pkt *Packet) error {
-	if !IsRTPPacket(pkt.UDPPayload) {
+	if !IsRTPPacket(pkt.Payload) {
 		return nil
 	}
 
@@ -246,7 +186,7 @@ func (p *LiveProcessor) processRTP(pkt *Packet) error {
 		return nil
 	}
 
-	return p.writeRTP(dialog, pkt.UDPPayload, srcIP, dstIP, pkt.SrcPort, pkt.DstPort, pkt.Timestamp)
+	return p.writeRTP(dialog, pkt.Payload, srcIP, dstIP, pkt.SrcPort, pkt.DstPort, pkt.Timestamp)
 }
 
 func (p *LiveProcessor) srtpContextForEndpoints(srcIP, dstIP net.IP, srcPort, dstPort uint16) *SRTPContext {

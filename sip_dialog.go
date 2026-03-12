@@ -3,8 +3,8 @@ package main
 import (
 	"fmt"
 	"net"
-	"sync"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -220,23 +220,4 @@ func (dt *DialogTracker) FindDialogForMedia(srcIP net.IP, srcPort int, dstIP net
 	}
 
 	return nil
-}
-
-// FindDialogByCallID finds a dialog by Call-ID
-func (dt *DialogTracker) FindDialogByCallID(callID string) *Dialog {
-	dt.RLock()
-	defer dt.RUnlock()
-	return dt.dialogsByCallID[callID]
-}
-
-// GetAllDialogs returns all tracked dialogs
-func (dt *DialogTracker) GetAllDialogs() []*Dialog {
-	dt.RLock()
-	defer dt.RUnlock()
-
-	dialogs := make([]*Dialog, 0, len(dt.dialogsByCallID))
-	for _, d := range dt.dialogsByCallID {
-		dialogs = append(dialogs, d)
-	}
-	return dialogs
 }

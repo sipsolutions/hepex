@@ -139,16 +139,3 @@ func ParseHEP(data []byte) (*HEPPacket, error) {
 func (p *HEPPacket) IsSIP() bool {
 	return p.ProtocolType == ProtocolSIP
 }
-
-// IsTLS returns true if the original capture was over TCP (TLS)
-func (p *HEPPacket) IsTLS() bool {
-	return p.ProtocolID == 6
-}
-
-// ProtocolTypeName returns human-readable protocol type name
-func (p *HEPPacket) ProtocolTypeName() string {
-	if p.ProtocolType == ProtocolSIP {
-		return "SIP"
-	}
-	return fmt.Sprintf("UNKNOWN(%d)", p.ProtocolType)
-}
