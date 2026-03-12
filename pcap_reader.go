@@ -154,7 +154,7 @@ func (p *LiveProcessor) processHEPSIP(pkt *Packet) error {
 		return nil
 	}
 
-	dialog := p.tracker.ProcessSIPMessage(sipMsg, hepPkt.Timestamp)
+	dialog := p.tracker.ProcessSIPMessage(sipMsg, hepPkt.SrcIP.String(), hepPkt.Timestamp)
 	if dialog != nil {
 		p.addDialogSRTPContexts(dialog)
 	}

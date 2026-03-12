@@ -11,8 +11,10 @@ import (
 
 // MediaStream represents an RTP/SRTP stream associated with a dialog
 type MediaStream struct {
+	Owner       string
 	LocalIP     net.IP
 	LocalPort   int
+	RTCPPort    int
 	MediaType   string // audio, video
 	CryptoSuite string
 	MasterKey   []byte
@@ -107,7 +109,7 @@ func NewDialogTracker() *DialogTracker {
 }
 
 // ProcessSIPMessage processes a SIP message and updates dialog state
-func (dt *DialogTracker) ProcessSIPMessage(msg *SIPMessage, timestamp time.Time) *Dialog {
+func (dt *DialogTracker) ProcessSIPMessage(msg *SIPMessage, senderIP string, timestamp time.Time) *Dialog {
 	dt.Lock()
 	defer dt.Unlock()
 
@@ -118,8 +120,8 @@ func (dt *DialogTracker) ProcessSIPMessage(msg *SIPMessage, timestamp time.Time)
 
 	dialog.LastSeen = timestamp
 
-	if msg.SDP != nil {
-		dt.replaceDialogMedia(dialog, msg.SDP)
+	if msg.SDP != nil && senderIP != "" {
+		dt.replaceDialogMedia(dialog, msg.SDP, senderIP)
 	}
 
 	return dialog
@@ -159,11 +161,17 @@ func (dt *DialogTracker) updateDialogMetadata(dialog *Dialog, msg *SIPMessage) {
 	}
 }
 
-func (dt *DialogTracker) replaceDialogMedia(dialog *Dialog, sdp *SDP) {
-	dt.unmapDialogMedia(dialog)
+func (dt *DialogTracker) replaceDialogMedia(dialog *Dialog, sdp *SDP, senderIP string) {
+	retained := make([]MediaStream, 0, len(dialog.MediaStreams))
+	for _, stream := range dialog.MediaStreams {
+		if stream.Owner == senderIP {
+			dt.unmapMediaStream(dialog, stream)
+			continue
+		}
+		retained = append(retained, stream)
+	}
 
-	streams := make([]MediaStream, 0, len(sdp.Media))
-	mediaKeys := make([]string, 0, len(sdp.Media)*2)
+	streams := retained
 	sessionConn := sdp.Connection
 
 	for _, media := range sdp.Media {
@@ -179,9 +187,16 @@ func (dt *DialogTracker) replaceDialogMedia(dialog *Dialog, sdp *SDP) {
 			continue
 		}
 
+		rtcpPort := media.Port + 1
+		if media.RTCP != 0 {
+			rtcpPort = media.RTCP
+		}
+
 		stream := MediaStream{
+			Owner:     senderIP,
 			LocalIP:   net.ParseIP(conn.Address),
 			LocalPort: media.Port,
+			RTCPPort:  rtcpPort,
 			MediaType: media.Type,
 		}
 		if len(media.Crypto) > 0 {
@@ -192,32 +207,36 @@ func (dt *DialogTracker) replaceDialogMedia(dialog *Dialog, sdp *SDP) {
 		}
 
 		streams = append(streams, stream)
-
-		rtpKey := mediaAddressKey(conn.Address, media.Port)
-		dt.mediaToDialog[rtpKey] = dialog
-		mediaKeys = append(mediaKeys, rtpKey)
-
-		rtcpPort := media.Port + 1
-		if media.RTCP != 0 {
-			rtcpPort = media.RTCP
-		}
-		rtcpKey := mediaAddressKey(conn.Address, rtcpPort)
-		dt.mediaToDialog[rtcpKey] = dialog
-		mediaKeys = append(mediaKeys, rtcpKey)
+		dt.mapMediaStream(dialog, stream)
 	}
 
 	dialog.MediaStreams = streams
-	dialog.MediaKeys = mediaKeys
+	dialog.MediaKeys = dialog.MediaKeys[:0]
+	for _, stream := range dialog.MediaStreams {
+		dialog.MediaKeys = append(dialog.MediaKeys, mediaKeysForStream(stream)...)
+	}
 }
 
 func (dt *DialogTracker) unmapDialogMedia(dialog *Dialog) {
-	for _, key := range dialog.MediaKeys {
+	for _, stream := range dialog.MediaStreams {
+		dt.unmapMediaStream(dialog, stream)
+	}
+	dialog.MediaStreams = nil
+	dialog.MediaKeys = nil
+}
+
+func (dt *DialogTracker) mapMediaStream(dialog *Dialog, stream MediaStream) {
+	for _, key := range mediaKeysForStream(stream) {
+		dt.mediaToDialog[key] = dialog
+	}
+}
+
+func (dt *DialogTracker) unmapMediaStream(dialog *Dialog, stream MediaStream) {
+	for _, key := range mediaKeysForStream(stream) {
 		if dt.mediaToDialog[key] == dialog {
 			delete(dt.mediaToDialog, key)
 		}
 	}
-	dialog.MediaStreams = nil
-	dialog.MediaKeys = nil
 }
 
 func (dt *DialogTracker) PruneExpired(now time.Time, maxIdle time.Duration) []*Dialog {
@@ -240,6 +259,13 @@ func (dt *DialogTracker) PruneExpired(now time.Time, maxIdle time.Duration) []*D
 
 func mediaAddressKey(address string, port int) string {
 	return fmt.Sprintf("%s:%d", address, port)
+}
+
+func mediaKeysForStream(stream MediaStream) []string {
+	return []string{
+		mediaAddressKey(stream.LocalIP.String(), stream.LocalPort),
+		mediaAddressKey(stream.LocalIP.String(), stream.RTCPPort),
+	}
 }
 
 // FindDialogForMedia finds the dialog associated with an RTP/RTCP stream
